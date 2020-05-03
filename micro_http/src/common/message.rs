@@ -7,4 +7,5 @@ pub trait Message {
     fn with_header(&mut self, key: String, value: String) -> &mut Self;
     fn version(&self) -> Version;
     fn body(&mut self) -> Option<&Vec<u8>>;
+    fn with_body(&mut self, bytes: &[u8]) -> &mut Self;
 }

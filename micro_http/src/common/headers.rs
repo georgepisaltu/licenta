@@ -175,6 +175,23 @@ impl Headers {
         }
         Err(RequestError::InvalidRequest)
     }
+
+    pub fn write_all<T: Write>(&self, mut buf: T) -> Result<(), WriteError> {
+        for (key, value) in self.map {
+            buf.write_all(key.as_bytes());
+            buf.write_all(b": ");
+            buf.write_all(value.as_bytes());
+            buf.write_all(b"\r\n");
+        }
+        if(self.content_length > 0) {
+            buf.write_all(b"Content-Length: ");
+            buf.write_all(self.content_length.to_string().as_bytes());
+            buf.write_all(b"\r\n");
+        }
+        buf.write_all
+
+        Ok(())
+    }
 }
 
 /// Wrapper over supported Media Types.

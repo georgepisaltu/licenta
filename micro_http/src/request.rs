@@ -170,6 +170,11 @@ impl Message for Request {
             None
         }
     }
+
+    fn with_body(&mut self, bytes: &[u8]) -> &mut Self {
+        self.body = Some(Body::new(bytes));
+        self
+    }
 }
 
 impl Request {
