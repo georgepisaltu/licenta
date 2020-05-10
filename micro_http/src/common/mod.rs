@@ -111,12 +111,7 @@ impl Body {
         Self { stream: body.into() }
     }
 
-    /// Returns the body as an `u8 slice`.
-    pub fn as_readonly_stream(&self) -> &[u8] {
-        self.stream.as_slice()
-    }
-
-    pub fn as_stream(&mut self) -> &Vec<u8> {
+    pub fn as_stream(&mut self) -> &mut Vec<u8> {
         self.stream.as_mut()
     }
 

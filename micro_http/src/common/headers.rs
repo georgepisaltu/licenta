@@ -3,6 +3,7 @@
 
 use std::result::Result;
 use std::collections::HashMap;
+use std::io::{Error as WriteError, Write};
 
 use RequestError;
 
@@ -131,7 +132,7 @@ impl Headers {
         self.map.get(key)
     }
 
-    pub fn with_header_line(&mut self, key: String, value: String) {
+    pub fn add_header_line(&mut self, key: String, value: String) {
         self.map.insert(key, value);
     }
 
@@ -177,18 +178,18 @@ impl Headers {
     }
 
     pub fn write_all<T: Write>(&self, mut buf: T) -> Result<(), WriteError> {
-        for (key, value) in self.map {
-            buf.write_all(key.as_bytes());
-            buf.write_all(b": ");
-            buf.write_all(value.as_bytes());
-            buf.write_all(b"\r\n");
+        for (key, value) in &self.map {
+            buf.write_all(key.as_bytes())?;
+            buf.write_all(b": ")?;
+            buf.write_all(value.as_bytes())?;
+            buf.write_all(b"\r\n")?;
         }
-        if(self.content_length > 0) {
-            buf.write_all(b"Content-Length: ");
-            buf.write_all(self.content_length.to_string().as_bytes());
-            buf.write_all(b"\r\n");
+        if self.content_length > 0 {
+            buf.write_all(b"Content-Length: ")?;
+            buf.write_all(self.content_length.to_string().as_bytes())?;
+            buf.write_all(b"\r\n")?;
         }
-        buf.write_all
+        buf.write_all(b"\r\n")?;
 
         Ok(())
     }

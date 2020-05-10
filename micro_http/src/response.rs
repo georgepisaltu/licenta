@@ -83,11 +83,11 @@ pub struct Response {
 }
 
 impl Message for Response {
-    fn send<U: Write>(&mut self, out: &mut U) -> i32 {
+    fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError> {
         self.status_line.write_all(out)?;
         // self.headers.write_all(&mut buf)?;
         // self.write_body(&mut buf)?;
-        0
+        Ok(())
     }
 
     fn header_line(&self, key: &String) -> Option<&String> {
@@ -95,7 +95,7 @@ impl Message for Response {
     }
 
     fn with_header(&mut self, key: String, value: String) -> &mut Self {
-        self.headers.with_header_line(key, value);
+        self.headers.add_header_line(key, value);
         self
     }
 

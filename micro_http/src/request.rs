@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::from_utf8;
-use std::io::Write;
+use std::io::{Error as WriteError, Write};
 
 use common::ascii::{CR, CRLF_LEN, LF, SP};
 pub use common::RequestError;
@@ -124,6 +124,17 @@ impl RequestLine {
         })
     }
 
+    pub fn write_all<T: Write>(&self, buf: &mut T) -> Result<(), WriteError> {
+        buf.write_all(self.method.raw())?;
+        buf.write_all(&[SP])?;
+        buf.write_all(self.uri.get_abs_path().as_bytes())?;
+        buf.write_all(&[SP])?;
+        buf.write_all(self.http_version.raw())?;
+        buf.write_all(&[SP, CR, LF])?;
+
+        Ok(())
+    }
+
     // Returns the minimum length of a valid request. The request must contain
     // the method (GET), the URI (minmum 1 character), the HTTP version(HTTP/DIGIT.DIGIT) and
     // 2 separators (SP).
@@ -145,9 +156,16 @@ pub struct Request {
 }
 
 impl Message for Request {
-    fn send<U: Write>(&mut self, out: &mut U) -> i32 {
-        //std::io::copy(&mut self.body.as_readonly_stream(), out);
-        0
+    fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError> {
+        self.request_line.write_all(out)?;
+        self.headers.write_all(out)?;
+        match self.body {
+            Some(body) => {
+                std::io::copy(body.as_stream().as_mut_slice(), out)?;
+            }
+            None => {}
+        }
+        Ok(())
     }
 
     fn header_line(&self, key: &String) -> Option<&String> {
@@ -155,7 +173,7 @@ impl Message for Request {
     }
 
     fn with_header(&mut self, key: String, value: String) -> &mut Self {
-        self.headers.with_header_line(key, value);
+        self.headers.add_header_line(key, value);
         self
     }
 
