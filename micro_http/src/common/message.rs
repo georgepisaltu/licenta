@@ -1,5 +1,5 @@
-use std::io::{Error as WriteError, Write};
 use common::{Body, Version};
+use std::io::{Error as WriteError, Write};
 
 pub trait Message {
     fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError>;

@@ -1,14 +1,15 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::str::from_utf8;
 use std::io::{Error as WriteError, Write};
+use std::str::from_utf8;
 
 use common::ascii::{CR, CRLF_LEN, LF, SP};
+use common::message::Message;
+use common::MessageError;
 pub use common::RequestError;
 use common::{Body, Method, Version};
 use headers::Headers;
-use common::message::Message;
 
 /// Finds the first occurence of `sequence` in the `bytes` slice.
 ///
@@ -35,12 +36,15 @@ impl Uri {
         }
     }
 
-    fn try_from(bytes: &[u8]) -> Result<Self, RequestError> {
+    fn try_from(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.is_empty() {
-            return Err(RequestError::InvalidUri("Empty URI not allowed."));
+            return Err(MessageError::InvalidRequest(RequestError::InvalidUri(
+                "Empty URI not allowed.",
+            )));
         }
-        let utf8_slice =
-            from_utf8(bytes).map_err(|_| RequestError::InvalidUri("Cannot parse URI as UTF-8."))?;
+        let utf8_slice = from_utf8(bytes).map_err(|_| {
+            MessageError::InvalidRequest(RequestError::InvalidUri("Cannot parse URI as UTF-8."))
+        })?;
         Ok(Self::new(utf8_slice))
     }
 
@@ -114,7 +118,7 @@ impl RequestLine {
     /// `InvalidHttpMethod` is returned if the specified HTTP method is unsupported.
     /// `InvalidHttpVersion` is returned if the specified HTTP version is unsupported.
     /// `InvalidUri` is returned if the specified Uri is not valid.
-    pub fn try_from(request_line: &[u8]) -> Result<Self, RequestError> {
+    pub fn try_from(request_line: &[u8]) -> Result<Self, MessageError> {
         let (method, uri, version) = Self::parse_request_line(request_line);
 
         Ok(Self {
@@ -159,9 +163,10 @@ impl Message for Request {
     fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError> {
         self.request_line.write_all(out)?;
         self.headers.write_all(out)?;
-        match self.body {
+        match self.body.as_mut() {
             Some(body) => {
-                std::io::copy(body.as_stream().as_mut_slice(), out)?;
+                let mut slice: &[u8] = body.as_stream().as_mut_slice();
+                std::io::copy(&mut slice, out)?;
             }
             None => {}
         }
@@ -218,17 +223,17 @@ impl Request {
     ///
     /// let http_request = Request::try_from(b"GET http://localhost/home HTTP/1.0\r\n");
     /// ```
-    pub fn try_from(byte_stream: &[u8]) -> Result<Self, RequestError> {
+    pub fn try_from(byte_stream: &[u8]) -> Result<Self, MessageError> {
         // The first line of the request is the Request Line. The line ending is CR LF.
         let request_line_end = match find(byte_stream, &[CR, LF]) {
             Some(len) => len,
             // If no CR LF is found in the stream, the request format is invalid.
-            None => return Err(RequestError::InvalidRequest),
+            None => return Err(MessageError::InvalidRequest(RequestError::InvalidRequest)),
         };
 
         let request_line_bytes = &byte_stream[..request_line_end];
         if request_line_bytes.len() < RequestLine::min_len() {
-            return Err(RequestError::InvalidRequest);
+            return Err(MessageError::InvalidRequest(RequestError::InvalidRequest));
         }
 
         let request_line = RequestLine::try_from(request_line_bytes)?;
@@ -263,7 +268,7 @@ impl Request {
                         if headers_and_body.len() - (headers_end + 2 * CRLF_LEN)
                             < content_length as usize
                         {
-                            return Err(RequestError::InvalidRequest);
+                            return Err(MessageError::InvalidRequest(RequestError::InvalidRequest));
                         }
                         let body_as_bytes = &headers_and_body[(headers_end + 2 * CRLF_LEN)..];
                         // If the actual length of the body is different than the `Content-Length` value
@@ -271,7 +276,7 @@ impl Request {
                         if body_as_bytes.len() == content_length as usize {
                             Some(Body::new(body_as_bytes))
                         } else {
-                            return Err(RequestError::InvalidRequest);
+                            return Err(MessageError::InvalidRequest(RequestError::InvalidRequest));
                         }
                     }
                 };
@@ -284,7 +289,7 @@ impl Request {
             }
             // If we can't find a CR LF CR LF even though the request should have headers
             // the request format is invalid.
-            None => Err(RequestError::InvalidRequest),
+            None => Err(MessageError::InvalidRequest(RequestError::InvalidRequest)),
         }
     }
 

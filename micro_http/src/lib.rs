@@ -111,14 +111,17 @@
 
 extern crate libc;
 
+mod client;
 mod common;
 mod request;
 mod response;
 use common::ascii;
 use common::headers;
 
+pub use client::Client;
 pub use request::{Request, RequestError};
-pub use response::{Response, StatusCode};
+pub use response::{Response, ResponseError, StatusCode};
 
 pub use common::headers::{Headers, MediaType};
-pub use common::{Body, Method, Version};
+pub use common::message::Message;
+pub use common::{Body, MessageError, Method, Version};

@@ -1,11 +1,11 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::result::Result;
 use std::collections::HashMap;
 use std::io::{Error as WriteError, Write};
+use std::result::Result;
 
-use RequestError;
+use common::MessageError;
 
 /// Wrapper over an HTTP Header type.
 #[derive(Debug, Eq, Hash, PartialEq)]
@@ -40,7 +40,7 @@ impl Header {
     /// # Errors
     /// `InvalidRequest` is returned if slice contains invalid utf8 characters.
     /// `InvalidHeader` is returned if unsupported header found.
-    fn try_from(string: &[u8]) -> Result<Self, RequestError> {
+    fn try_from(string: &[u8]) -> Result<Self, MessageError> {
         if let Ok(mut utf8_string) = String::from_utf8(string.to_vec()) {
             utf8_string.make_ascii_lowercase();
             match utf8_string.trim() {
@@ -49,10 +49,10 @@ impl Header {
                 "expect" => Ok(Self::Expect),
                 "transfer-encoding" => Ok(Self::TransferEncoding),
                 "server" => Ok(Self::Server),
-                _ => Err(RequestError::InvalidHeader),
+                _ => Err(MessageError::InvalidHeader),
             }
         } else {
-            Err(RequestError::InvalidRequest)
+            Err(MessageError::InvalidHeader)
         }
     }
 }
@@ -97,13 +97,13 @@ impl Headers {
     /// assert!(request_header.parse_header_line(b"Content-Length: 24").is_ok());
     /// assert!(request_header.parse_header_line(b"Content-Length: 24: 2").is_err());
     /// ```
-    pub fn parse_header_line(&mut self, header_line: &[u8]) -> Result<(), RequestError> {
+    pub fn parse_header_line(&mut self, header_line: &[u8]) -> Result<(), MessageError> {
         // Headers must be ASCII, so also UTF-8 valid.
         match std::str::from_utf8(header_line) {
             Ok(headers_str) => {
                 let entry = headers_str.split(": ").collect::<Vec<&str>>();
                 if entry.len() != 2 {
-                    return Err(RequestError::InvalidHeader);
+                    return Err(MessageError::InvalidHeader);
                 }
 
                 if entry[0].to_lowercase() == "content-length" {
@@ -112,14 +112,14 @@ impl Headers {
                             self.content_length = content_length;
                             Ok(())
                         }
-                        Err(_) => Err(RequestError::InvalidHeader),
+                        Err(_) => Err(MessageError::InvalidHeader),
                     }
                 } else {
                     self.map.insert(entry[0].to_string(), entry[1].to_string());
                     Ok(())
                 }
             }
-            _ => Err(RequestError::InvalidHeader),
+            _ => Err(MessageError::InvalidHeader),
         }
     }
 
@@ -157,7 +157,7 @@ impl Headers {
     ///
     /// let request_headers = Headers::try_from(b"Content-Length: 55\r\n\r\n");
     /// ```
-    pub fn try_from(bytes: &[u8]) -> Result<Headers, RequestError> {
+    pub fn try_from(bytes: &[u8]) -> Result<Headers, MessageError> {
         // Headers must be ASCII, so also UTF-8 valid.
         if let Ok(text) = std::str::from_utf8(bytes) {
             let mut headers = Self::default();
@@ -168,16 +168,16 @@ impl Headers {
                     break;
                 }
                 match headers.parse_header_line(header_line.as_bytes()) {
-                    Ok(_) | Err(RequestError::UnsupportedHeader) => continue,
+                    Ok(_) | Err(MessageError::UnsupportedHeader) => continue,
                     Err(e) => return Err(e),
                 };
             }
             return Ok(headers);
         }
-        Err(RequestError::InvalidRequest)
+        Err(MessageError::InvalidHeader)
     }
 
-    pub fn write_all<T: Write>(&self, mut buf: T) -> Result<(), WriteError> {
+    pub fn write_all<T: Write>(&self, buf: &mut T) -> Result<(), WriteError> {
         for (key, value) in &self.map {
             buf.write_all(key.as_bytes())?;
             buf.write_all(b": ")?;
@@ -228,16 +228,16 @@ impl MediaType {
     /// assert!(MediaType::try_from(b"application/json").is_ok());
     /// assert!(MediaType::try_from(b"application/json2").is_err());
     /// ```
-    pub fn try_from(bytes: &[u8]) -> Result<Self, RequestError> {
+    pub fn try_from(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.is_empty() {
-            return Err(RequestError::InvalidRequest);
+            return Err(MessageError::InvalidHeader);
         }
         let utf8_slice =
-            String::from_utf8(bytes.to_vec()).map_err(|_| RequestError::InvalidRequest)?;
+            String::from_utf8(bytes.to_vec()).map_err(|_| MessageError::InvalidHeader)?;
         match utf8_slice.as_str().trim() {
             "text/plain" => Ok(Self::PlainText),
             "application/json" => Ok(Self::ApplicationJson),
-            _ => Err(RequestError::InvalidRequest),
+            _ => Err(MessageError::InvalidHeader),
         }
     }
 
