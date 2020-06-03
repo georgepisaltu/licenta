@@ -82,8 +82,8 @@ impl StatusLine {
         buf.write_all(self.http_version.raw())?;
         buf.write_all(&[SP])?;
         buf.write_all(self.status_code.raw())?;
-        buf.write_all(&[SP])?;
         if let Some(status_text) = &self.status_message {
+            buf.write_all(&[SP])?;
             buf.write_all(status_text.as_bytes())?;
         }
         buf.write_all(&[CR, LF])?;
@@ -145,6 +145,12 @@ pub struct Response {
 
 impl Message for Response {
     fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError> {
+        let mut content_length: i32 = 0;
+        if let Some(body) = self.body() {
+            content_length = body.len() as i32;
+        }
+        self.headers.set_content_length(content_length);
+
         self.status_line.write_all(out)?;
         self.headers.write_all(out)?;
         match self.body.as_mut() {
@@ -179,6 +185,7 @@ impl Message for Response {
     }
 
     fn with_body(&mut self, bytes: &[u8]) -> &mut Self {
+        self.headers.set_content_length(bytes.len() as i32);
         self.body = Some(Body::new(bytes));
         self
     }
@@ -222,21 +229,23 @@ impl Response {
             }
             n => {
                 if let Some(status_end) = find(&buf[..], &[CR, LF]) {
+                    let headers_and_body = &buf[(status_end + CRLF_LEN)..n];
                     if let Some(headers_end) =
-                        find(&buf[(status_end + CRLF_LEN)..], &[CR, LF, CR, LF])
+                        find(&headers_and_body[..], &[CR, LF, CR, LF])
                     {
                         let mut response = Response {
                             status_line: StatusLine::try_from(&buf[..status_end])?,
-                            headers: Headers::try_from(&buf[(status_end + CRLF_LEN)..headers_end])?,
+                            headers: Headers::try_from(&headers_and_body[..headers_end])?,
                             body: Default::default(),
                         };
 
                         if response.headers.content_length() != 0 {
+                            let body_bytes = &headers_and_body[(headers_end + 2 * CRLF_LEN)..];
                             let mut bytes_left = response.headers.content_length();
                             let mut body: Vec<u8> = Vec::with_capacity(bytes_left as usize);
-                            let buffered_body_len = (n - (headers_end + 2 * CRLF_LEN)) as i32;
+                            let buffered_body_len = body_bytes.len() as i32;
                             bytes_left -= buffered_body_len;
-                            body.write_all(&buf[(headers_end + 2 * CRLF_LEN)..n])
+                            body.write_all(&body_bytes[..])
                                 .map_err(|_| MessageError::IOError)?;
 
                             if bytes_left > 0 {

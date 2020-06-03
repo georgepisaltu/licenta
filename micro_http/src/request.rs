@@ -131,10 +131,10 @@ impl RequestLine {
     pub fn write_all<T: Write>(&self, buf: &mut T) -> Result<(), WriteError> {
         buf.write_all(self.method.raw())?;
         buf.write_all(&[SP])?;
-        buf.write_all(self.uri.get_abs_path().as_bytes())?;
+        buf.write_all(self.uri.path.as_bytes())?;
         buf.write_all(&[SP])?;
         buf.write_all(self.http_version.raw())?;
-        buf.write_all(&[SP, CR, LF])?;
+        buf.write_all(&[CR, LF])?;
 
         Ok(())
     }
@@ -161,6 +161,12 @@ pub struct Request {
 
 impl Message for Request {
     fn send<U: Write>(&mut self, out: &mut U) -> Result<(), WriteError> {
+        let mut content_length: i32 = 0;
+        if let Some(body) = self.body() {
+            content_length = body.len() as i32;
+        }
+        self.headers.set_content_length(content_length);
+
         self.request_line.write_all(out)?;
         self.headers.write_all(out)?;
         match self.body.as_mut() {
@@ -195,6 +201,7 @@ impl Message for Request {
     }
 
     fn with_body(&mut self, bytes: &[u8]) -> &mut Self {
+        self.headers.set_content_length(bytes.len() as i32);
         self.body = Some(Body::new(bytes));
         self
     }
@@ -290,6 +297,20 @@ impl Request {
             // If we can't find a CR LF CR LF even though the request should have headers
             // the request format is invalid.
             None => Err(MessageError::InvalidRequest(RequestError::InvalidRequest)),
+        }
+    }
+
+    pub fn new(method: Method, uri: String, http_version: Version) -> Self {
+        let request_line = RequestLine {
+            method,
+            uri: Uri::new(uri.as_str()),
+            http_version,
+        };
+
+        Self {
+            request_line,
+            headers: Headers::default(),
+            body: None,
         }
     }
 

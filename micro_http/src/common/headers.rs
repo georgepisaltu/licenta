@@ -128,6 +128,10 @@ impl Headers {
         self.content_length
     }
 
+    pub fn set_content_length(&mut self, content_length: i32) {
+        self.content_length = content_length;
+    }
+
     pub fn header_line(&self, key: &str) -> Option<&String> {
         self.map.get(key)
     }
