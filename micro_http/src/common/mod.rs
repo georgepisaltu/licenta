@@ -87,7 +87,7 @@ impl Display for ResponseError {
 #[derive(Debug)]
 pub enum ConnectionError {
     /// The request parsing has failed.
-    ParseError(RequestError),
+    ParseError(MessageError),
     /// Could not perform a stream operation successfully.
     StreamError(std::io::Error),
     /// Attempted to read or write on a closed connection.
