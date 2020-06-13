@@ -3,6 +3,7 @@
 
 use std::fmt::{Display, Error, Formatter};
 
+pub mod epoll;
 pub mod headers;
 pub mod message;
 

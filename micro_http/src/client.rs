@@ -1,12 +1,9 @@
-use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use common::message::Message;
-use common::Version;
 use common::{ClientError, MessageError};
 use request::Request;
 use response::Response;
-use response::StatusCode;
 
 pub struct Client {
     socket: TcpStream,

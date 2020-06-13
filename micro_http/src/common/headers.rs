@@ -73,7 +73,7 @@ pub struct Headers {
     /// The `Content-Length` header field tells us how many bytes we need to receive
     /// from the source after the headers.
     content_length: i32,
-    map: HashMap<String, String>,
+    pub map: HashMap<String, String>,
 }
 
 impl Headers {

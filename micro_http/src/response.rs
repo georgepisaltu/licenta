@@ -3,11 +3,11 @@
 
 use std::io::{Error as WriteError, Read, Write};
 
-use ascii::{COLON, CR, CRLF_LEN, LF, SP};
+use ascii::{CR, CRLF_LEN, LF, SP};
 use common::message::Message;
 pub use common::ResponseError;
 use common::{Body, MessageError, Version};
-use headers::{Header, Headers, MediaType};
+use headers::Headers;
 use request::find;
 
 /// Wrapper over a response status code.

@@ -1,4 +1,4 @@
-use common::{Body, Version};
+use common::Version;
 use std::io::{Error as WriteError, Write};
 
 pub trait Message {

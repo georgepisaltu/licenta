@@ -4,14 +4,15 @@ use std::os::unix::io::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-use common::{Body, Version};
+use common::Version;
 pub use common::{ConnectionError, RequestError, ServerError};
+use common::message::Message;
 use connection::HttpConnection;
 use request::Request;
 use response::{Response, StatusCode};
 use std::collections::HashMap;
 
-use utils::epoll;
+use common::epoll::{ControlOperation, Epoll, EPOLL_IN, EPOLL_OUT, EpollEvent, EventSet};
 
 static SERVER_FULL_ERROR_MESSAGE: &[u8] = b"HTTP/1.1 503\r\n\
                                             Server: Firecracker API\r\n\
@@ -116,7 +117,7 @@ impl<T: Read + Write> ClientConnection<T> {
                 // We should try to write an error message regardless.
                 let mut internal_error_response =
                     Response::new(Version::Http11, StatusCode::InternalServerError);
-                internal_error_response.set_body(Body::new(inner.to_string()));
+                internal_error_response.with_body(inner.to_string().as_bytes());
                 self.connection.enqueue_response(internal_error_response);
             }
             Err(ConnectionError::ParseError(inner)) => {
@@ -126,10 +127,10 @@ impl<T: Read + Write> ClientConnection<T> {
 
                 // Send an error response for the request that gave us the error.
                 let mut error_response = Response::new(Version::Http11, StatusCode::BadRequest);
-                error_response.set_body(Body::new(format!(
+                error_response.with_body(format!(
                     "{{ \"error\": \"{}\nAll previous unanswered requests will be dropped.\" }}",
                     inner.to_string()
-                )));
+                ).as_bytes());
                 self.connection.enqueue_response(error_response);
             }
             Err(ConnectionError::InvalidWrite) => {
@@ -237,7 +238,7 @@ pub struct HttpServer {
     /// Socket on which we listen for new connections.
     socket: UnixListener,
     /// Server's epoll instance.
-    epoll: epoll::Epoll,
+    epoll: Epoll,
     /// Holds the token-connection pairs of the server.
     /// Each connection has an associated identification token, which is
     /// the file descriptor of the underlying stream.
@@ -255,7 +256,7 @@ impl HttpServer {
     /// Returns an `IOError` when binding or `epoll::create` fails.
     pub fn new<P: AsRef<Path>>(path_to_socket: P) -> Result<Self> {
         let socket = UnixListener::bind(path_to_socket).map_err(ServerError::IOError)?;
-        let epoll = epoll::Epoll::new().map_err(ServerError::IOError)?;
+        let epoll = Epoll::new().map_err(ServerError::IOError)?;
         Ok(Self {
             socket,
             epoll,
@@ -272,12 +273,12 @@ impl HttpServer {
 
     pub fn requests(&mut self) -> Result<Vec<ServerRequest>> {
         let mut parsed_requests: Vec<ServerRequest> = vec![];
-        let mut events = vec![epoll::EpollEvent::default(); MAX_CONNECTIONS];
+        let mut events = vec![EpollEvent::default(); MAX_CONNECTIONS];
         // This is a wrapper over the syscall `epoll_wait` and it will block the
         // current thread until at least one event is received.
         // The received notifications will then populate the `events` array with
         // `event_count` elements, where 1 <= event_count <= MAX_CONNECTIONS.
-        let event_count = match self.epoll.wait(MAX_CONNECTIONS, -1, &mut events[..]) {
+        let event_count = match self.epoll.wait(MAX_CONNECTIONS, &mut events[..]) {
             Ok(event_count) => event_count,
             Err(e) if e.raw_os_error() == Some(libc::EINTR) => 0,
             Err(e) => return Err(ServerError::IOError(e)),
@@ -315,7 +316,7 @@ impl HttpServer {
                 // We have a notification on one of our open connections.
                 let fd = e.fd();
                 let client_connection = self.connections.get_mut(&fd).unwrap();
-                if e.event_set().contains(epoll::EventSet::IN) {
+                if e.event_set().contains(EPOLL_IN) {
                     // We have bytes to read from this connection.
                     // If our `read` yields `Request` objects, we wrap them with an ID before
                     // handing them to the user.
@@ -330,16 +331,16 @@ impl HttpServer {
                     // either an error message or an `expect` response, we change its `epoll`
                     // event set to notify us when the stream is ready for writing.
                     if client_connection.state == ClientConnectionState::AwaitingOutgoing {
-                        Self::epoll_mod(&self.epoll, fd, epoll::EventSet::OUT)?;
+                        Self::epoll_mod(&self.epoll, fd, EventSet::new(EPOLL_OUT))?;
                     }
-                } else if e.event_set().contains(epoll::EventSet::OUT) {
+                } else if e.event_set().contains(EPOLL_OUT) {
                     // We have bytes to write on this connection.
                     client_connection.write()?;
                     // If the connection was outgoing before we tried to write the responses
                     // and we don't have any more responses to write, we change the `epoll`
                     // event set to notify us when we have bytes to read from the stream.
                     if client_connection.state == ClientConnectionState::AwaitingIncoming {
-                        Self::epoll_mod(&self.epoll, fd, epoll::EventSet::IN)?;
+                        Self::epoll_mod(&self.epoll, fd, EventSet::new(EPOLL_IN))?;
                     }
                 }
             }
@@ -352,7 +353,7 @@ impl HttpServer {
         Ok(parsed_requests)
     }
 
-    pub fn epoll(&self) -> &epoll::Epoll {
+    pub fn epoll(&self) -> &Epoll {
         &self.epoll
     }
 
@@ -378,7 +379,7 @@ impl HttpServer {
             // `epoll` event set to notify us when the stream is ready for writing.
             if let ClientConnectionState::AwaitingIncoming = client_connection.state {
                 client_connection.state = ClientConnectionState::AwaitingOutgoing;
-                Self::epoll_mod(&self.epoll, response.id as RawFd, epoll::EventSet::OUT)?;
+                Self::epoll_mod(&self.epoll, response.id as RawFd, EventSet::new(EPOLL_OUT))?;
             }
             client_connection.enqueue_response(response.response);
         }
@@ -424,10 +425,10 @@ impl HttpServer {
     ///
     /// # Errors
     /// `IOError` is returned when an `EPOLL_CTL_MOD` control operation fails.
-    fn epoll_mod(epoll: &epoll::Epoll, stream_fd: RawFd, evset: epoll::EventSet) -> Result<()> {
-        let event = epoll::EpollEvent::new(evset, stream_fd as u64);
+    fn epoll_mod(epoll: &Epoll, stream_fd: RawFd, evset: EventSet) -> Result<()> {
+        let event = EpollEvent::new(evset, stream_fd as u64);
         epoll
-            .ctl(epoll::ControlOperation::Modify, stream_fd, &event)
+            .ctl(ControlOperation::Modify, stream_fd, &event)
             .map_err(ServerError::IOError)
     }
 
@@ -435,13 +436,326 @@ impl HttpServer {
     ///
     /// # Errors
     /// `IOError` is returned when an `EPOLL_CTL_ADD` control operation fails.
-    fn epoll_add(epoll: &epoll::Epoll, stream_fd: RawFd) -> Result<()> {
+    fn epoll_add(epoll: &Epoll, stream_fd: RawFd) -> Result<()> {
         epoll
             .ctl(
-                epoll::ControlOperation::Add,
+                ControlOperation::Add,
                 stream_fd,
-                &epoll::EpollEvent::new(epoll::EventSet::IN, stream_fd as u64),
+                &EpollEvent::new(EventSet::new(EPOLL_IN), stream_fd as u64),
             )
             .map_err(ServerError::IOError)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate vmm_sys_util;
+
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    use server::tests::vmm_sys_util::tempfile::TempFile;
+
+    fn get_temp_socket_file() -> TempFile {
+        let mut path_to_socket = TempFile::new().unwrap();
+        path_to_socket.remove().unwrap();
+        path_to_socket
+    }
+
+    impl PartialEq for Request {
+        fn eq(&self, other: &Self) -> bool {
+            // Ignore the other fields of Request for now because they are not used.
+            self.request_line == other.request_line
+                && self.headers.content_length() == other.headers.content_length()
+                && self.headers.map == other.headers.map
+        }
+    }
+
+    #[test]
+    fn test_wait_one_connection() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection.
+        let mut socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: 13\r\n\
+                         Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+    }
+
+    #[test]
+    fn test_wait_concurrent_connections() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        // Test two concurrent connections.
+        let mut first_socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        first_socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                               Content-Length: 13\r\n\
+                               Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+        let mut second_socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+        second_socket
+            .write_all(
+                b"GET /machine-config HTTP/1.1\r\n\
+                                Content-Length: 20\r\n\
+                                Content-Type: application/json\r\n\r\nwhatever second body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let second_server_request = req_vec.remove(0);
+
+        assert_eq!(
+            second_server_request.request,
+            Request::try_from(
+                b"GET /machine-config HTTP/1.1\r\n\
+            Content-Length: 20\r\n\
+            Content-Type: application/json\r\n\r\nwhatever second body"
+            )
+            .unwrap()
+        );
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(first_socket.read(&mut buf[..]).unwrap() > 0);
+        first_socket.shutdown(std::net::Shutdown::Both).unwrap();
+
+        server
+            .respond(second_server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response second body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).unwrap() > 0);
+        second_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_wait_expect_connection() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection with `Expect: 100-continue`.
+        let mut socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: 13\r\n\
+                         Expect: 100-continue\r\n\r\n",
+            )
+            .unwrap();
+        // `wait` on server to receive what the client set on the socket.
+        // This will set the stream direction to `Outgoing`, as we need to send a `100 CONTINUE` response.
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+        // Another `wait`, this time to send the response.
+        // Will be called because of an `EPOLLOUT` notification.
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+
+        socket.write_all(b"whatever body").unwrap();
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+    }
+
+    #[test]
+    fn test_wait_many_connections() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        let mut sockets: Vec<UnixStream> = Vec::with_capacity(11);
+        for _ in 0..MAX_CONNECTIONS {
+            sockets.push(UnixStream::connect(path_to_socket.as_path()).unwrap());
+            assert!(server.requests().unwrap().is_empty());
+        }
+
+        sockets.push(UnixStream::connect(path_to_socket.as_path()).unwrap());
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 120] = [0; 120];
+        sockets[MAX_CONNECTIONS].read_exact(&mut buf).unwrap();
+        assert_eq!(&buf[..], SERVER_FULL_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn test_wait_parse_error() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection.
+        let mut socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: alpha\r\n\
+                         Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 116] = [0; 116];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+        let error_message = b"HTTP/1.1 400\r\n\
+                              Content-Length: 80\r\n\r\n{ \"error\": \"Invalid header.\n\
+                              All previous unanswered requests will be dropped.\" }";
+        assert_eq!(&buf[..], &error_message[..]);
+    }
+
+    #[test]
+    fn test_wait_in_flight_responses() {
+        let path_to_socket = get_temp_socket_file();
+
+        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        server.start_server().unwrap();
+
+        // Test a connection dropped and then a new one appearing
+        // before the user had a chance to send the response to the
+        // first one.
+        let mut first_socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        first_socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                               Content-Length: 13\r\n\
+                               Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        first_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+        let mut second_socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        second_socket.set_nonblocking(true).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        server
+            .enqueue_responses(vec![server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            })])
+            .unwrap();
+        assert!(server.requests().unwrap().is_empty());
+        assert_eq!(server.connections.len(), 1);
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).is_err());
+
+        second_socket
+            .write_all(
+                b"GET /machine-config HTTP/1.1\r\n\
+                                Content-Length: 20\r\n\
+                                Content-Type: application/json\r\n\r\nwhatever second body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let second_server_request = req_vec.remove(0);
+
+        assert_eq!(
+            second_server_request.request,
+            Request::try_from(
+                b"GET /machine-config HTTP/1.1\r\n\
+            Content-Length: 20\r\n\
+            Content-Type: application/json\r\n\r\nwhatever second body"
+            )
+            .unwrap()
+        );
+
+        server
+            .respond(second_server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response second body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).unwrap() > 0);
+        second_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().is_ok());
     }
 }

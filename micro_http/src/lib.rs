@@ -116,6 +116,7 @@ mod common;
 mod connection;
 mod request;
 mod response;
+mod server;
 use common::ascii;
 use common::headers;
 
@@ -123,6 +124,7 @@ pub use client::Client;
 pub use connection::HttpConnection;
 pub use request::{Request, RequestError};
 pub use response::{Response, ResponseError, StatusCode};
+pub use server::{HttpServer, ServerError};
 
 pub use common::headers::{Headers, MediaType};
 pub use common::message::Message;
