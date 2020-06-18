@@ -1,23 +1,20 @@
-use std::net::TcpStream;
-
 use common::message::Message;
 use common::{ClientError, MessageError};
 use request::Request;
 use response::Response;
 
-pub struct Client {
-    socket: TcpStream,
-    addr: String,
-    buffer: Vec<u8>,
+use std::io::{Read, Write};
+
+pub struct Client<T> {
+    socket: T,
+    base_url: String,
 }
 
-impl Client {
-    pub fn new(url: String, buffer_size: usize) -> Result<Client, ClientError> {
-        let stream = TcpStream::connect(url.clone()).map_err(ClientError::StreamError)?;
+impl<T: Read + Write> Client<T> {
+    pub fn new(stream: T, base_url: String) -> Result<Client<T>, ClientError> {
         Ok(Client {
             socket: stream,
-            addr: url,
-            buffer: Vec::with_capacity(buffer_size),
+            base_url,
         })
     }
 
@@ -26,5 +23,9 @@ impl Client {
             .send(&mut self.socket)
             .map_err(|_| MessageError::IOError)?;
         Ok(Response::receive(&mut self.socket)?)
+    }
+
+    pub fn base_url(&self) -> &String {
+        &self.base_url
     }
 }
