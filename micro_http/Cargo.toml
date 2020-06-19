@@ -5,4 +5,6 @@ authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 
 [dependencies]
 libc = ">=0.2.39"
+
+[dev-dependencies]
 vmm-sys-util = ">=0.2.1"

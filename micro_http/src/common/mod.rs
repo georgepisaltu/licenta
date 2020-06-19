@@ -151,8 +151,8 @@ impl Display for ServerError {
 /// ```
 /// extern crate micro_http;
 /// use micro_http::Body;
-/// let body = Body::new("This is a test body.".to_string());
-/// assert_eq!(body.raw(), b"This is a test body.");
+/// let mut body = Body::new("This is a test body.".to_string());
+/// assert_eq!(body.as_stream().as_slice(), b"This is a test body.");
 /// assert_eq!(body.len(), 20);
 /// ```
 #[derive(Clone, Debug, PartialEq)]

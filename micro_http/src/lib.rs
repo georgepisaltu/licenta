@@ -46,29 +46,29 @@
 //! ## Example for parsing an HTTP Request from a slice
 //! ```
 //! extern crate micro_http;
-//! use micro_http::{Request, Version};
+//! use micro_http::{Message, Request, Version};
 //!
 //! let http_request = Request::try_from(b"GET http://localhost/home HTTP/1.0\r\n\r\n").unwrap();
-//! assert_eq!(http_request.http_version(), Version::Http10);
+//! assert_eq!(http_request.version(), Version::Http10);
 //! assert_eq!(http_request.uri().get_abs_path(), "/home");
 //! ```
 //!
 //! ## Example for creating an HTTP Response
 //! ```
 //! extern crate micro_http;
-//! use micro_http::{Body, MediaType, Response, StatusCode, Version};
+//! use micro_http::{Body, MediaType, Message, Response, StatusCode, Version};
 //!
 //! let mut response = Response::new(Version::Http10, StatusCode::OK);
 //! let body = String::from("This is a test");
-//! response.set_body(Body::new(body.clone()));
-//! response.set_content_type(MediaType::PlainText);
+//! response.with_body(body.as_bytes())
+//!         .with_header("Content-Type".to_string(), "text/plain".to_string());
 //!
 //! assert!(response.status() == StatusCode::OK);
-//! assert_eq!(response.body().unwrap(), Body::new(body));
-//! assert_eq!(response.http_version(), Version::Http10);
+//! assert_eq!(response.body().unwrap().as_slice(), body.as_bytes());
+//! assert_eq!(response.version(), Version::Http10);
 //!
 //! let mut response_buf: [u8; 126] = [0; 126];
-//! assert!(response.write_all(&mut response_buf.as_mut()).is_ok());
+//! assert!(response.send(&mut response_buf.as_mut()).is_ok());
 //! ```
 //!
 //! `HttpConnection` can be used for automatic data exchange and parsing when
@@ -83,13 +83,13 @@
 //!
 //! ```
 //! extern crate micro_http;
-//! use micro_http::{HttpServer, Response, StatusCode};
+//! use micro_http::{HttpServer, Message, Response, StatusCode};
 //!
 //! let path_to_socket = "/tmp/example.sock";
 //! std::fs::remove_file(path_to_socket).unwrap_or_default();
 //!
 //! // Start the server.
-//! let mut server = HttpServer::new(path_to_socket).unwrap();
+//! let mut server = HttpServer::new_uds(path_to_socket).unwrap();
 //! server.start_server().unwrap();
 //!
 //! // Connect a client to the server so it doesn't block in our example.
@@ -100,7 +100,7 @@
 //!     for request in server.requests().unwrap() {
 //!         let response = request.process(|request| {
 //!             // Your code here.
-//!             Response::new(request.http_version(), StatusCode::NoContent)
+//!             Response::new(request.version(), StatusCode::NoContent)
 //!         });
 //!         server.respond(response);
 //!     }

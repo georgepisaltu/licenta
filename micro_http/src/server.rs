@@ -210,7 +210,7 @@ impl<T: Read + Write> ClientConnection<T> {
 /// ## Starting and running the server
 ///
 /// ```
-/// use micro_http::{HttpServer, Response, StatusCode};
+/// use micro_http::{HttpServer, Message, Response, StatusCode};
 ///
 /// let path_to_socket = "/tmp/example.sock";
 /// std::fs::remove_file(path_to_socket).unwrap_or_default();
@@ -227,7 +227,7 @@ impl<T: Read + Write> ClientConnection<T> {
 ///     for request in server.requests().unwrap() {
 ///         let response = request.process(|request| {
 ///             // Your code here.
-///             Response::new(request.http_version(), StatusCode::NoContent)
+///             Response::new(request.version(), StatusCode::NoContent)
 ///         });
 ///         server.respond(response);
 ///     }
@@ -470,14 +470,28 @@ mod tests {
 
     use super::*;
     use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
     use std::os::unix::net::UnixStream;
 
     use server::tests::vmm_sys_util::tempfile::TempFile;
+
+    const local_addr: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
     fn get_temp_socket_file() -> TempFile {
         let mut path_to_socket = TempFile::new().unwrap();
         path_to_socket.remove().unwrap();
         path_to_socket
+    }
+
+    fn get_temp_tcp_server() -> Result<(HttpServer, u16)> {
+        let mut port = 36000;
+        while port <= std::u16::MAX {
+            if let Ok(server) = HttpServer::new_tcp(SocketAddr::new(local_addr, port)) {
+                return Ok((server, port));
+            }
+            port += 1;
+        };
+        Err(ServerError::ServerFull)
     }
 
     impl PartialEq for Request {
@@ -491,6 +505,7 @@ mod tests {
 
     #[test]
     fn test_wait_one_connection() {
+        // UDS
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -523,10 +538,45 @@ mod tests {
 
         let mut buf: [u8; 1024] = [0; 1024];
         assert!(socket.read(&mut buf[..]).unwrap() > 0);
+
+
+
+        // TCP
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection.
+        let mut socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: 13\r\n\
+                         Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
     }
 
     #[test]
     fn test_wait_concurrent_connections() {
+        // UDS
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -595,10 +645,81 @@ mod tests {
         assert!(second_socket.read(&mut buf[..]).unwrap() > 0);
         second_socket.shutdown(std::net::Shutdown::Both).unwrap();
         assert!(server.requests().unwrap().is_empty());
+
+
+
+        // TCP
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        // Test two concurrent connections.
+        let mut first_socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        first_socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                               Content-Length: 13\r\n\
+                               Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+        let mut second_socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+        second_socket
+            .write_all(
+                b"GET /machine-config HTTP/1.1\r\n\
+                                Content-Length: 20\r\n\
+                                Content-Type: application/json\r\n\r\nwhatever second body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let second_server_request = req_vec.remove(0);
+
+        assert_eq!(
+            second_server_request.request,
+            Request::try_from(
+                b"GET /machine-config HTTP/1.1\r\n\
+            Content-Length: 20\r\n\
+            Content-Type: application/json\r\n\r\nwhatever second body"
+            )
+            .unwrap()
+        );
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(first_socket.read(&mut buf[..]).unwrap() > 0);
+        first_socket.shutdown(std::net::Shutdown::Both).unwrap();
+
+        server
+            .respond(second_server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response second body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).unwrap() > 0);
+        second_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().unwrap().is_empty());
     }
 
     #[test]
     fn test_wait_expect_connection() {
+        // UDS
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -644,10 +765,57 @@ mod tests {
 
         let mut buf: [u8; 1024] = [0; 1024];
         assert!(socket.read(&mut buf[..]).unwrap() > 0);
+
+
+        // TCP
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection with `Expect: 100-continue`.
+        let mut socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: 13\r\n\
+                         Expect: 100-continue\r\n\r\n",
+            )
+            .unwrap();
+        // `wait` on server to receive what the client set on the socket.
+        // This will set the stream direction to `Outgoing`, as we need to send a `100 CONTINUE` response.
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+        // Another `wait`, this time to send the response.
+        // Will be called because of an `EPOLLOUT` notification.
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+
+        socket.write_all(b"whatever body").unwrap();
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        server
+            .respond(server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        let req_vec = server.requests().unwrap();
+        assert!(req_vec.is_empty());
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
     }
 
     #[test]
     fn test_wait_many_connections() {
+        // UDS
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -664,10 +832,27 @@ mod tests {
         let mut buf: [u8; 120] = [0; 120];
         sockets[MAX_CONNECTIONS].read_exact(&mut buf).unwrap();
         assert_eq!(&buf[..], SERVER_FULL_ERROR_MESSAGE);
+
+        // TCP
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        let mut sockets: Vec<TcpStream> = Vec::with_capacity(11);
+        for _ in 0..MAX_CONNECTIONS {
+            sockets.push(TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap());
+            assert!(server.requests().unwrap().is_empty());
+        }
+
+        sockets.push(TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap());
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 120] = [0; 120];
+        sockets[MAX_CONNECTIONS].read_exact(&mut buf).unwrap();
+        assert_eq!(&buf[..], SERVER_FULL_ERROR_MESSAGE);
     }
 
     #[test]
     fn test_wait_parse_error() {
+        // UDS
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -694,10 +879,36 @@ mod tests {
                               Content-Length: 80\r\n\r\n{ \"error\": \"Invalid header.\n\
                               All previous unanswered requests will be dropped.\" }";
         assert_eq!(&buf[..], &error_message[..]);
+
+        // TCP
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        // Test one incoming connection.
+        let mut socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                         Content-Length: alpha\r\n\
+                         Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 116] = [0; 116];
+        assert!(socket.read(&mut buf[..]).unwrap() > 0);
+        let error_message = b"HTTP/1.1 400\r\n\
+                              Content-Length: 80\r\n\r\n{ \"error\": \"Invalid header.\n\
+                              All previous unanswered requests will be dropped.\" }";
+        assert_eq!(&buf[..], &error_message[..]);
     }
 
     #[test]
-    fn test_wait_in_flight_responses() {
+    fn test_wait_in_flight_responses_uds() {
         let path_to_socket = get_temp_socket_file();
 
         let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
@@ -723,6 +934,84 @@ mod tests {
         first_socket.shutdown(std::net::Shutdown::Both).unwrap();
         assert!(server.requests().unwrap().is_empty());
         let mut second_socket = UnixStream::connect(path_to_socket.as_path()).unwrap();
+        second_socket.set_nonblocking(true).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        server
+            .enqueue_responses(vec![server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response body";
+                response.with_body(response_body);
+                response
+            })])
+            .unwrap();
+        assert!(server.requests().unwrap().is_empty());
+        assert_eq!(server.connections.len(), 1);
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).is_err());
+
+        second_socket
+            .write_all(
+                b"GET /machine-config HTTP/1.1\r\n\
+                                Content-Length: 20\r\n\
+                                Content-Type: application/json\r\n\r\nwhatever second body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let second_server_request = req_vec.remove(0);
+
+        assert_eq!(
+            second_server_request.request,
+            Request::try_from(
+                b"GET /machine-config HTTP/1.1\r\n\
+            Content-Length: 20\r\n\
+            Content-Type: application/json\r\n\r\nwhatever second body"
+            )
+            .unwrap()
+        );
+
+        server
+            .respond(second_server_request.process(|_request| {
+                let mut response = Response::new(Version::Http11, StatusCode::OK);
+                let response_body = b"response second body";
+                response.with_body(response_body);
+                response
+            }))
+            .unwrap();
+
+        assert!(server.requests().unwrap().is_empty());
+        let mut buf: [u8; 1024] = [0; 1024];
+        assert!(second_socket.read(&mut buf[..]).unwrap() > 0);
+        second_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().is_ok());
+    }
+
+    #[test]
+    fn test_wait_in_flight_responses_tcp() {
+        let (mut server, port) = get_temp_tcp_server().unwrap();
+        server.start_server().unwrap();
+
+        // Test a connection dropped and then a new one appearing
+        // before the user had a chance to send the response to the
+        // first one.
+        let mut first_socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+
+        first_socket
+            .write_all(
+                b"PATCH /machine-config HTTP/1.1\r\n\
+                               Content-Length: 13\r\n\
+                               Content-Type: application/json\r\n\r\nwhatever body",
+            )
+            .unwrap();
+
+        let mut req_vec = server.requests().unwrap();
+        let server_request = req_vec.remove(0);
+
+        first_socket.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(server.requests().unwrap().is_empty());
+        let mut second_socket = TcpStream::connect(SocketAddr::new(local_addr, port)).unwrap();
         second_socket.set_nonblocking(true).unwrap();
         assert!(server.requests().unwrap().is_empty());
 
