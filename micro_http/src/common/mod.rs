@@ -6,6 +6,7 @@ use std::fmt::{Display, Error, Formatter};
 pub mod epoll;
 pub mod headers;
 pub mod message;
+pub mod net;
 
 pub mod ascii {
     pub const CR: u8 = b'\r';

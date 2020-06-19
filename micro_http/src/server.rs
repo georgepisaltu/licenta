@@ -1,12 +1,13 @@
 use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 use common::Version;
 pub use common::{ConnectionError, RequestError, ServerError};
 use common::message::Message;
+use common::net::{PollableListener, PollableStream};
 use connection::HttpConnection;
 use request::Request;
 use response::{Response, StatusCode};
@@ -215,7 +216,7 @@ impl<T: Read + Write> ClientConnection<T> {
 /// std::fs::remove_file(path_to_socket).unwrap_or_default();
 ///
 /// // Start the server.
-/// let mut server = HttpServer::new(path_to_socket).unwrap();
+/// let mut server = HttpServer::new_uds(path_to_socket).unwrap();
 /// server.start_server().unwrap();
 ///
 /// // Connect a client to the server so it doesn't block in our example.
@@ -236,7 +237,7 @@ impl<T: Read + Write> ClientConnection<T> {
 /// ```
 pub struct HttpServer {
     /// Socket on which we listen for new connections.
-    socket: UnixListener,
+    socket: PollableListener,
     /// Server's epoll instance.
     epoll: Epoll,
     /// Holds the token-connection pairs of the server.
@@ -244,18 +245,34 @@ pub struct HttpServer {
     /// the file descriptor of the underlying stream.
     /// We use the file descriptor of the stream as the key for mapping
     /// connections because the 1-to-1 relation is guaranteed by the OS.
-    connections: HashMap<RawFd, ClientConnection<UnixStream>>,
+    connections: HashMap<RawFd, ClientConnection<PollableStream>>,
 }
 
 impl HttpServer {
-    /// Constructor for `HttpServer`.
+    /// Constructor for `HttpServer` on a TCP socket.
     ///
     /// Returns the newly formed `HttpServer`.
     ///
     /// # Errors
     /// Returns an `IOError` when binding or `epoll::create` fails.
-    pub fn new<P: AsRef<Path>>(path_to_socket: P) -> Result<Self> {
-        let socket = UnixListener::bind(path_to_socket).map_err(ServerError::IOError)?;
+    pub fn new_tcp<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+        let socket = PollableListener::bind_tcp(addr).map_err(ServerError::IOError)?;
+        let epoll = Epoll::new().map_err(ServerError::IOError)?;
+        Ok(Self {
+            socket,
+            epoll,
+            connections: HashMap::new(),
+        })
+    }
+
+    /// Constructor for `HttpServer` on a Unix Domain Socket.
+    ///
+    /// Returns the newly formed `HttpServer`.
+    ///
+    /// # Errors
+    /// Returns an `IOError` when binding or `epoll::create` fails.
+    pub fn new_uds<P: AsRef<Path>>(path_to_socket: P) -> Result<Self> {
+        let socket = PollableListener::bind_uds(path_to_socket).map_err(ServerError::IOError)?;
         let epoll = Epoll::new().map_err(ServerError::IOError)?;
         Ok(Self {
             socket,
@@ -302,7 +319,7 @@ impl HttpServer {
                         self.socket
                             .accept()
                             .map_err(ServerError::IOError)
-                            .and_then(move |(mut stream, _)| {
+                            .and_then(move |mut stream| {
                                 stream
                                     .write(SERVER_FULL_ERROR_MESSAGE)
                                     .map_err(ServerError::IOError)
@@ -401,7 +418,7 @@ impl HttpServer {
         self.socket
             .accept()
             .map_err(ServerError::IOError)
-            .and_then(|(stream, _)| {
+            .and_then(|stream| {
                 // `HttpConnection` is supposed to work with non-blocking streams.
                 stream
                     .set_nonblocking(true)
@@ -476,7 +493,7 @@ mod tests {
     fn test_wait_one_connection() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         // Test one incoming connection.
@@ -512,7 +529,7 @@ mod tests {
     fn test_wait_concurrent_connections() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         // Test two concurrent connections.
@@ -584,7 +601,7 @@ mod tests {
     fn test_wait_expect_connection() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         // Test one incoming connection with `Expect: 100-continue`.
@@ -633,7 +650,7 @@ mod tests {
     fn test_wait_many_connections() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         let mut sockets: Vec<UnixStream> = Vec::with_capacity(11);
@@ -653,7 +670,7 @@ mod tests {
     fn test_wait_parse_error() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         // Test one incoming connection.
@@ -683,7 +700,7 @@ mod tests {
     fn test_wait_in_flight_responses() {
         let path_to_socket = get_temp_socket_file();
 
-        let mut server = HttpServer::new(path_to_socket.as_path()).unwrap();
+        let mut server = HttpServer::new_uds(path_to_socket.as_path()).unwrap();
         server.start_server().unwrap();
 
         // Test a connection dropped and then a new one appearing
