@@ -3,9 +3,11 @@
 
 use std::fmt::{Display, Error, Formatter};
 
+#[cfg(feature = "epoll_server")]
 pub mod epoll;
 pub mod headers;
 pub mod message;
+#[cfg(feature = "epoll_server")]
 pub mod net;
 
 pub mod ascii {

@@ -109,6 +109,7 @@
 //! }
 //! ```
 
+#[cfg(feature = "epoll_server")]
 extern crate libc;
 
 mod client;
@@ -116,6 +117,7 @@ mod common;
 mod connection;
 mod request;
 mod response;
+#[cfg(feature = "epoll_server")]
 mod server;
 use common::ascii;
 use common::headers;
@@ -124,6 +126,8 @@ pub use client::Client;
 pub use connection::HttpConnection;
 pub use request::{Request, RequestError};
 pub use response::{Response, ResponseError, StatusCode};
+
+#[cfg(feature = "epoll_server")]
 pub use server::{HttpServer, ServerError};
 
 pub use common::headers::{Headers, MediaType};

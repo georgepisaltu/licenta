@@ -1,8 +1,11 @@
 [package]
 name = "micro_http"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 
 [dependencies]
-libc = ">=0.2.39"
-vmm-sys-util = ">=0.2.1"
+libc = { version = ">=0.2.39", optional = true }
+vmm-sys-util = { version = ">=0.2.1", optional = true }
+
+[features]
+epoll_server = ["libc", "vmm-sys-util"]
