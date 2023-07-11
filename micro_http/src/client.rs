@@ -11,7 +11,7 @@ pub struct Client<T> {
 }
 
 impl<T: Read + Write> Client<T> {
-    /// New docs comment
+    /// Altered docs comment
     pub fn new(stream: T, base_url: String) -> Result<Client<T>, ClientError> {
         Ok(Client {
             socket: stream,
